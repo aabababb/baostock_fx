@@ -20,7 +20,7 @@ import akshare as ak
 import baostock as bs
 from openai import OpenAI
 
-CONFIG_FILE = "aks_config10.json"
+CONFIG_FILE = "aks_config_jweb.json"
 
 # ---------- 全局日志缓冲区 ----------
 log_buffer = []          # 存储日志字符串
