@@ -1,0 +1,7 @@
+pandas
+requests
+beautifulsoup4
+akshare
+baostock
+openai>=1.0
+tzdata
