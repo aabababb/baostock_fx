@@ -598,7 +598,6 @@ def wait_until_schedule(schedule_hour: int, schedule_minute: int):
     log(f"下次分析时间：{next_run.strftime('%Y-%m-%d %H:%M:%S')}，等待 {wait_seconds/60:.2f} 分钟")
     time.sleep(wait_seconds)
 
-
 def main():
     # 启动 HTTP 服务（如果配置了密码）
     if web_passwd:
@@ -616,39 +615,41 @@ def main():
         log(f"配置的调度时间格式错误: {schedule_time_str}，使用默认09:00")
         schedule_hour, schedule_minute = 9, 0
 
-    try:
-        while True:
-            # 1. 精确等待到设定时间
-            wait_until_schedule(schedule_hour, schedule_minute)
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime.now(tz)
+    last_analysis_date = None
 
-            # 2. 执行AI分析
-            log(f"到达调度时间 {schedule_time_str}，开始执行AI分析")
+    # 启动时判断：若已过设定时间，立即执行一次分析，否则等待到设定时间
+    if (now.hour > schedule_hour or (now.hour == schedule_hour and now.minute >= schedule_minute)):
+        log(f"启动时已过设定时间 {schedule_time_str}，立即执行AI分析")
+        run_analysis()
+        last_analysis_date = now.date()
+        log("AI分析完成，进入新闻刷新循环（每30分钟）")
+    else:
+        log(f"未到设定时间，等待到 {schedule_time_str} 执行AI分析")
+        wait_until_schedule(schedule_hour, schedule_minute)
+        run_analysis()
+        last_analysis_date = datetime.now(tz).date()
+        log("AI分析完成，进入新闻刷新循环（每30分钟）")
+
+    # 新闻刷新循环，直到第二天设定时间
+    while True:
+        time.sleep(1800)
+        now = datetime.now(tz)
+        log(f"新闻刷新唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 检查是否到达新的一天的设定时间
+        if (now.date() != last_analysis_date) and \
+           (now.hour > schedule_hour or (now.hour == schedule_hour and now.minute >= schedule_minute)):
+            log(f"到达新一天的调度时间 {schedule_time_str}，执行AI分析")
             run_analysis()
-
-            # 3. 分析完成后，立即执行一次新闻刷新
-            log("AI分析完成，立即执行一次新闻刷新")
+            last_analysis_date = now.date()
+            log("AI分析完成，继续新闻刷新循环")
+        else:
             refresh_news()
+            next_refresh = now + timedelta(minutes=30)
+            log(f"下一次新闻刷新预计时间：{next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            # 4. 进入每30分钟新闻刷新循环，直到下一次分析时间
-            log("进入新闻刷新循环（每30分钟）")
-            while True:
-                time.sleep(1800)
-                now = datetime.now(ZoneInfo("Asia/Shanghai"))
-                log(f"新闻刷新唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-                # 检查是否到达下一次分析时间
-                next_run = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
-                if now >= next_run:
-                    log("已到达下一次分析时间，退出新闻刷新循环")
-                    break
-                else:
-                    refresh_news()
-                    # 输出下一次刷新时间
-                    next_refresh = now + timedelta(minutes=30)
-                    log(f"下一次新闻刷新预计时间：{next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    except KeyboardInterrupt:
-        log("收到中断信号，程序退出")
 
 
 if __name__ == "__main__":
