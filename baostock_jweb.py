@@ -625,30 +625,30 @@ def main():
             log(f"到达调度时间 {schedule_time_str}，开始执行AI分析")
             run_analysis()
 
-            # 3. 分析完成后，进入每30分钟新闻刷新，直到下一次设定时间
-            log("AI分析完成，进入新闻刷新模式（每30分钟）")
+            # 3. 分析完成后，立即执行一次新闻刷新
+            log("AI分析完成，立即执行一次新闻刷新")
+            refresh_news()
+
+            # 4. 进入每30分钟新闻刷新循环，直到下一次分析时间
+            log("进入新闻刷新循环（每30分钟）")
             while True:
-                time.sleep(1800)  # 30分钟
-                tz = ZoneInfo("Asia/Shanghai")
-                now = datetime.now(tz)
+                time.sleep(1800)
+                now = datetime.now(ZoneInfo("Asia/Shanghai"))
                 log(f"新闻刷新唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
 
-                # 检查是否到达了第二天设定时间，如果到达则跳出新闻循环，重新等待分析
+                # 检查是否到达下一次分析时间
                 next_run = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
                 if now >= next_run:
                     log("已到达下一次分析时间，退出新闻刷新循环")
                     break
                 else:
                     refresh_news()
-                    # 输出下一次刷新时间（当前时间+30分钟）
+                    # 输出下一次刷新时间
                     next_refresh = now + timedelta(minutes=30)
                     log(f"下一次新闻刷新预计时间：{next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
 
     except KeyboardInterrupt:
         log("收到中断信号，程序退出")
-    except Exception as e:
-        log(f"主循环异常: {e}")
-        time.sleep(60)  # 等待后继续
 
 
 if __name__ == "__main__":
