@@ -194,6 +194,29 @@ def get_stock_news(stock_code: str, max_news: int = 5) -> str:
     log(f"股票 {stock_code} 未获取到新闻")
     return "无相关新闻"
 
+
+def refresh_news():
+    """每半小时执行一次：获取当前低价股列表，并更新每只股票的新闻（仅记录日志，不调用AI）"""
+    log("========== 开始新闻刷新任务 ==========")
+    try:
+        # 获取当前低价股列表（与 run_analysis 中相同）
+        lowest_stocks = get_lowest_price_stocks(10)
+        if not lowest_stocks:
+            log("新闻刷新：无法获取低价股列表，跳过本次新闻更新")
+            return
+
+        log(f"新闻刷新：获取到 {len(lowest_stocks)} 只低价股，开始获取新闻...")
+        for code, price in lowest_stocks:
+            # 获取新闻（函数内部已有日志输出）
+            news_text = get_stock_news(code, NEWS_CONFIG.get("max_news", 5))
+            # 可在此处添加缓存或仅记录日志，目前仅保持获取动作
+            # 例如：log(f"新闻刷新：股票 {code} 新闻获取完成，长度 {len(news_text)}")
+            # 避免过于频繁的日志，可注释掉
+        log("新闻刷新任务完成")
+    except Exception as e:
+        log(f"新闻刷新任务发生异常: {e}")
+
+
 # ---------- Baostock 历史数据 ----------
 def baostock_login():
     lg = bs.login()
@@ -555,19 +578,14 @@ def run_analysis():
         log("配置要求自动关机，正在执行关机命令...")
         os.system("shutdown -h now")
 
-# ---------- 定时调度 ----------
-def wait_until_next_9am():
-    """阻塞直到下一个北京时间 9:00"""
+
+def should_run_analysis_today(last_run_date: date) -> bool:
+    """判断今天是否已执行过分析（默认每天只执行一次）"""
     tz = ZoneInfo("Asia/Shanghai")
     now = datetime.now(tz)
-    next_run = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    if now >= next_run:
-        next_run += timedelta(days=1)
-    wait_seconds = (next_run - now).total_seconds()
-    log(f"下次执行时间：{next_run.strftime('%Y-%m-%d %H:%M:%S')}，等待 {wait_seconds/3600:.2f} 小时")
-    time.sleep(wait_seconds)
+    # 检查是否已过9点，并且上次运行日期不是今天
+    return now.hour >= 9 and last_run_date != now.date()
 
-# ---------- 主入口 ----------
 def main():
     # 启动 HTTP 服务（如果配置了密码）
     if web_passwd:
@@ -576,14 +594,34 @@ def main():
     else:
         log("未配置 web.passwd，HTTP 状态服务不启动")
 
-    log("程序启动，进入定时调度模式（每天北京时间 9:00 执行）")
+    log("程序启动，进入定时调度模式：每30分钟检查一次，9点执行AI分析，其他时间刷新新闻")
+
+    last_analysis_date = None  # 记录上次分析日期，避免同一天重复执行
 
     try:
         while True:
-            wait_until_next_9am()
-            run_analysis()
+            # 每30分钟唤醒一次
+            time.sleep(1800)
+
+            tz = ZoneInfo("Asia/Shanghai")
+            now = datetime.now(tz)
+            log(f"调度唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # 判断是否应该执行AI分析（9点后且今天尚未执行）
+            if now.hour >= 9 and last_analysis_date != now.date():
+                log("满足条件：今天9点后尚未执行分析，开始执行AI分析流程")
+                run_analysis()
+                last_analysis_date = now.date()
+            else:
+                # 非分析时段，执行新闻刷新
+                log("当前非分析时段，执行新闻刷新任务")
+                refresh_news()
+
     except KeyboardInterrupt:
         log("收到中断信号，程序退出")
+
+
+
 
 if __name__ == "__main__":
     main()
