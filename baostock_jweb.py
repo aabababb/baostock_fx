@@ -8,7 +8,7 @@ import threading
 from urllib.parse import urlparse, parse_qs
 from email.mime.text import MIMEText
 from email.header import Header
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo  # Python 3.9+，若低版本需安装 backports.zoneinfo
 import pandas as pd
 from pandas.tseries.offsets import BDay
@@ -25,10 +25,11 @@ CONFIG_FILE = "aks_config_jweb.json"
 # ---------- 全局日志缓冲区 ----------
 log_buffer = []          # 存储日志字符串
 log_lock = threading.Lock()
+analysis_running = False  # 标志：是否正在执行AI分析
 
-# ---------- 日志函数（同时输出到控制台和缓冲区） ----------
+# ---------- 日志函数（同时输出到控制台和缓冲区，使用北京时间） ----------
 def log(msg: str):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
     print(line)
     with log_lock:
@@ -51,6 +52,7 @@ EMAIL_CONFIG = config.get("email", {})
 SHUTDOWN_AFTER_RUN = config.get("shutdown", False)
 web_passwd = config.get("web", {}).get("passwd")  # 若配置，则启动HTTP状态服务
 AI_CONFIG = config.get("ai", {})
+schedule_time_str = config.get("schedule_time", "09:00")  # 定时执行时间，默认09:00
 
 # ---------- 获取低价股列表（自动选择实时行情源） ----------
 def get_lowest_price_stocks(n: int = 10) -> list:
@@ -193,29 +195,6 @@ def get_stock_news(stock_code: str, max_news: int = 5) -> str:
     # 3. 都失败返回空
     log(f"股票 {stock_code} 未获取到新闻")
     return "无相关新闻"
-
-
-def refresh_news():
-    """每半小时执行一次：获取当前低价股列表，并更新每只股票的新闻（仅记录日志，不调用AI）"""
-    log("========== 开始新闻刷新任务 ==========")
-    try:
-        # 获取当前低价股列表（与 run_analysis 中相同）
-        lowest_stocks = get_lowest_price_stocks(10)
-        if not lowest_stocks:
-            log("新闻刷新：无法获取低价股列表，跳过本次新闻更新")
-            return
-
-        log(f"新闻刷新：获取到 {len(lowest_stocks)} 只低价股，开始获取新闻...")
-        for code, price in lowest_stocks:
-            # 获取新闻（函数内部已有日志输出）
-            news_text = get_stock_news(code, NEWS_CONFIG.get("max_news", 5))
-            # 可在此处添加缓存或仅记录日志，目前仅保持获取动作
-            # 例如：log(f"新闻刷新：股票 {code} 新闻获取完成，长度 {len(news_text)}")
-            # 避免过于频繁的日志，可注释掉
-        log("新闻刷新任务完成")
-    except Exception as e:
-        log(f"新闻刷新任务发生异常: {e}")
-
 
 # ---------- Baostock 历史数据 ----------
 def baostock_login():
@@ -420,10 +399,11 @@ def send_email(subject: str, body: str, email_config: dict):
 
     try:
         if smtp_port == 465:
-            server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+            server = smtplib.SMTP_SSL(smtp_server)
         else:
-            server = smtplib.SMTP(smtp_server, smtp_port)
+            server = smtplib.SMTP(smtp_server)
             server.starttls()
+        server.connect(smtp_server, smtp_port)
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, receivers, message.as_string())
         server.quit()
@@ -450,7 +430,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
             with log_lock:
-                logs = list(log_buffer)
+                logs = list(log_buffer[-100:])  # 只输出最近100条日志
             if not logs:
                 self.wfile.write("暂无日志\n".encode('utf-8'))
             else:
@@ -471,121 +451,142 @@ def start_http_server(web_passwd):
     log(f"HTTP 状态服务已启动，监听 0.0.0.0:{port}，访问 /status?pass=你的密码")
     server.serve_forever()
 
+# ---------- 新闻刷新任务（每30分钟执行，AI分析期间跳过） ----------
+def refresh_news():
+    """每半小时执行一次：获取当前低价股列表，并更新每只股票的新闻（仅记录日志，不调用AI）"""
+    global analysis_running
+    if analysis_running:
+        log("正在执行AI分析，跳过本次新闻刷新")
+        return
+
+    log("========== 开始新闻刷新任务 ==========")
+    try:
+        lowest_stocks = get_lowest_price_stocks(10)
+        if not lowest_stocks:
+            log("新闻刷新：无法获取低价股列表，跳过本次新闻更新")
+            return
+
+        log(f"新闻刷新：获取到 {len(lowest_stocks)} 只低价股，开始获取新闻...")
+        for code, price in lowest_stocks:
+            news_text = get_stock_news(code, NEWS_CONFIG.get("max_news", 5))
+            # 这里仅获取新闻，不进行AI分析，日志已在函数内部输出
+        log("新闻刷新任务完成")
+    except Exception as e:
+        log(f"新闻刷新任务发生异常: {e}")
+
 # ---------- 核心分析任务 ----------
 def run_analysis():
     """执行一次完整的股票分析流程"""
-    log("========== 开始执行股票分析任务 ==========")
+    global analysis_running
+    analysis_running = True
+    try:
+        log("========== 开始执行股票分析任务 ==========")
 
-    # 初始化重试参数
-    max_retries = 3
-    retry_delays = [120, 600, 1800]  # 2分钟、10分钟、30分钟（秒）
+        # 初始化重试参数
+        max_retries = 3
+        retry_delays = [120, 600, 1800]  # 2分钟、10分钟、30分钟（秒）
 
-    lowest_stocks = None
-    baostock_ok = False
+        lowest_stocks = None
+        baostock_ok = False
 
-    for attempt in range(max_retries + 1):
-        log(f"初始化尝试 {attempt + 1}/{max_retries + 1}")
+        for attempt in range(max_retries + 1):
+            log(f"初始化尝试 {attempt + 1}/{max_retries + 1}")
 
-        lowest_stocks = get_lowest_price_stocks(10)
-        if not lowest_stocks:
-            log("无法获取低价股列表")
-        else:
-            if baostock_login():
-                baostock_ok = True
-                break
+            lowest_stocks = get_lowest_price_stocks(10)
+            if not lowest_stocks:
+                log("无法获取低价股列表")
             else:
-                log("Baostock 登录失败")
+                if baostock_login():
+                    baostock_ok = True
+                    break
+                else:
+                    log("Baostock 登录失败")
 
-        if baostock_ok:
-            break
+            if baostock_ok:
+                break
 
-        if attempt < max_retries:
-            wait_seconds = retry_delays[attempt]
-            log(f"等待 {wait_seconds // 60} 分钟后重试...")
-            time.sleep(wait_seconds)
+            if attempt < max_retries:
+                wait_seconds = retry_delays[attempt]
+                log(f"等待 {wait_seconds // 60} 分钟后重试...")
+                time.sleep(wait_seconds)
 
-    if not (lowest_stocks and baostock_ok):
-        log("多次重试后仍无法完成初始化，跳过本次任务。")
+        if not (lowest_stocks and baostock_ok):
+            log("多次重试后仍无法完成初始化，跳过本次任务。")
+            if SHUTDOWN_AFTER_RUN:
+                log("配置要求自动关机，正在执行关机命令...")
+                os.system("shutdown -h now")
+            return
+
+        log(f"成功获取低价股列表，共 {len(lowest_stocks)} 只股票")
+
+        today = datetime.now().date()
+        start_date = today - timedelta(days=365)
+        end_date = today
+        start_str = start_date.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
+
+        results_up = []
+
+        for code, price in lowest_stocks:
+            log(f"正在处理股票 {code}，价格 {price:.2f}")
+
+            news_text = get_stock_news(code, NEWS_CONFIG.get("max_news", 5))
+            df = get_stock_data_baostock(code, start_str, end_str, ADJUST)
+            if df.empty:
+                log(f"股票 {code} 无历史数据，跳过")
+                continue
+
+            prompt = prepare_prompt(code, df, news_text)
+            if not prompt:
+                log(f"股票 {code} 提示词构建失败，跳过")
+                continue
+
+            log(f"调用 AI 分析 {code} ...")
+            try:
+                analysis = analyze_with_ai(prompt, AI_CONFIG)
+            except Exception as e:
+                log(f"AI 分析股票 {code} 失败: {e}")
+                continue
+
+            print(f"\n--- 股票 {code} AI 预测结果 ---")
+            print(analysis)
+
+            if re.search(r"预测\s*[:：]\s*涨", analysis):
+                results_up.append({
+                    "code": code,
+                    "price": price,
+                    "news": news_text,
+                    "analysis": analysis,
+                    "last_date": df.iloc[-1]["date"].strftime("%Y-%m-%d")
+                })
+
+        baostock_logout()
+
+        if results_up:
+            log(f"共有 {len(results_up)} 只股票预测为涨，准备发送邮件...")
+            subject = f"A股低价股 AI 预测上涨通知 ({datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')})"
+            body = "以下股票 AI 预测下一交易日为上涨：\n\n"
+            for item in results_up:
+                body += f"股票代码: {item['code']}\n"
+                body += f"最新收盘价: {item['price']:.2f}\n"
+                body += f"数据截止日期: {item['last_date']}\n"
+                body += f"相关新闻: {item['news']}\n"
+                body += "AI 分析:\n"
+                body += item['analysis'] + "\n"
+                body += "-" * 40 + "\n"
+            send_email(subject, body, EMAIL_CONFIG)
+        else:
+            log("没有股票被预测为涨，不发送邮件。")
+
+        log("========== 本次股票分析任务结束 ==========")
+
         if SHUTDOWN_AFTER_RUN:
             log("配置要求自动关机，正在执行关机命令...")
             os.system("shutdown -h now")
-        return
+    finally:
+        analysis_running = False
 
-    log(f"成功获取低价股列表，共 {len(lowest_stocks)} 只股票")
-
-    today = datetime.now().date()
-    start_date = today - timedelta(days=365)
-    end_date = today
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = end_date.strftime("%Y-%m-%d")
-
-    results_up = []
-
-    for code, price in lowest_stocks:
-        log(f"正在处理股票 {code}，价格 {price:.2f}")
-
-        news_text = get_stock_news(code, NEWS_CONFIG.get("max_news", 5))
-        df = get_stock_data_baostock(code, start_str, end_str, ADJUST)
-        if df.empty:
-            log(f"股票 {code} 无历史数据，跳过")
-            continue
-
-        prompt = prepare_prompt(code, df, news_text)
-        if not prompt:
-            log(f"股票 {code} 提示词构建失败，跳过")
-            continue
-
-        log(f"调用 AI 分析 {code} ...")
-        try:
-            analysis = analyze_with_ai(prompt, AI_CONFIG)
-        except Exception as e:
-            log(f"AI 分析股票 {code} 失败: {e}")
-            continue
-
-        print(f"\n--- 股票 {code} AI 预测结果 ---")
-        print(analysis)
-
-        if re.search(r"预测\s*[:：]\s*涨", analysis):
-            results_up.append({
-                "code": code,
-                "price": price,
-                "news": news_text,
-                "analysis": analysis,
-                "last_date": df.iloc[-1]["date"].strftime("%Y-%m-%d")
-            })
-
-    baostock_logout()
-
-    if results_up:
-        log(f"共有 {len(results_up)} 只股票预测为涨，准备发送邮件...")
-        subject = f"A股低价股 AI 预测上涨通知 ({datetime.now().strftime('%Y-%m-%d')})"
-        body = "以下股票 AI 预测下一交易日为上涨：\n\n"
-        for item in results_up:
-            body += f"股票代码: {item['code']}\n"
-            body += f"最新收盘价: {item['price']:.2f}\n"
-            body += f"数据截止日期: {item['last_date']}\n"
-            body += f"相关新闻: {item['news']}\n"
-            body += "AI 分析:\n"
-            body += item['analysis'] + "\n"
-            body += "-" * 40 + "\n"
-        send_email(subject, body, EMAIL_CONFIG)
-    else:
-        log("没有股票被预测为涨，不发送邮件。")
-
-    log("========== 本次股票分析任务结束 ==========")
-
-    if SHUTDOWN_AFTER_RUN:
-        log("配置要求自动关机，正在执行关机命令...")
-        os.system("shutdown -h now")
-
-
-def should_run_analysis_today(last_run_date: date) -> bool:
-    """判断今天是否已执行过分析（默认每天只执行一次）"""
-    tz = ZoneInfo("Asia/Shanghai")
-    now = datetime.now(tz)
-    # 检查是否已过9点，并且上次运行日期不是今天
-    return now.hour >= 9 and last_run_date != now.date()
-
+# ---------- 主入口 ----------
 def main():
     # 启动 HTTP 服务（如果配置了密码）
     if web_passwd:
@@ -594,34 +595,37 @@ def main():
     else:
         log("未配置 web.passwd，HTTP 状态服务不启动")
 
-    log("程序启动，进入定时调度模式：每30分钟检查一次，9点执行AI分析，其他时间刷新新闻")
+    log(f"程序启动，定时调度模式：每30分钟检查一次，每天 {schedule_time_str} 执行AI分析，其他时间刷新新闻")
+
+    # 解析调度时间
+    try:
+        schedule_hour, schedule_minute = map(int, schedule_time_str.split(":"))
+    except Exception:
+        log(f"配置的调度时间格式错误: {schedule_time_str}，使用默认09:00")
+        schedule_hour, schedule_minute = 9, 0
 
     last_analysis_date = None  # 记录上次分析日期，避免同一天重复执行
 
     try:
         while True:
-            # 每30分钟唤醒一次
-            time.sleep(1800)
-
+            time.sleep(1800)  # 每30分钟唤醒一次
             tz = ZoneInfo("Asia/Shanghai")
             now = datetime.now(tz)
             log(f"调度唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            # 判断是否应该执行AI分析（9点后且今天尚未执行）
-            if now.hour >= 9 and last_analysis_date != now.date():
-                log("满足条件：今天9点后尚未执行分析，开始执行AI分析流程")
+            # 判断是否应执行分析：当前时间 >= 设定时间，且今天尚未执行
+            if (now.hour > schedule_hour or (now.hour == schedule_hour and now.minute >= schedule_minute)) \
+               and last_analysis_date != now.date():
+                log(f"达到调度时间 {schedule_time_str}，开始执行AI分析")
                 run_analysis()
                 last_analysis_date = now.date()
             else:
                 # 非分析时段，执行新闻刷新
-                log("当前非分析时段，执行新闻刷新任务")
+                log("执行新闻刷新任务")
                 refresh_news()
 
     except KeyboardInterrupt:
         log("收到中断信号，程序退出")
-
-
-
 
 if __name__ == "__main__":
     main()
