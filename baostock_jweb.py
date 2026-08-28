@@ -639,8 +639,10 @@ def main():
                     log("已到达下一次分析时间，退出新闻刷新循环")
                     break
                 else:
-                    # 否则执行新闻刷新
                     refresh_news()
+                    # 输出下一次刷新时间（当前时间+30分钟）
+                    next_refresh = now + timedelta(minutes=30)
+                    log(f"下一次新闻刷新预计时间：{next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
 
     except KeyboardInterrupt:
         log("收到中断信号，程序退出")
