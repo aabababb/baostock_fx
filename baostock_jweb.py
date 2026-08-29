@@ -382,34 +382,69 @@ def prepare_prompt(stock_code: str, df: pd.DataFrame, news_text: str = "") -> st
     return prompt
 
 # ---------- 邮件发送 ----------
+
 def send_email(subject: str, body: str, email_config: dict):
     if not email_config.get("sendmail", False):
         log("未启用邮件发送")
         return
-    smtp_server = email_config["smtp_server"]
-    smtp_port = email_config["smtp_port"]
-    sender_email = email_config["sender_email"]
-    sender_password = email_config["sender_password"]
-    receivers = email_config["receiver_emails"]
 
-    message = MIMEText(body, "plain", "utf-8")
-    message["From"] = Header(sender_email)
-    message["To"] = Header(",".join(receivers))
-    message["Subject"] = Header(subject, "utf-8")
+    mail_type = email_config.get("mail_type", "smtp").lower()
 
-    try:
-        if smtp_port == 465:
-            server = smtplib.SMTP_SSL(smtp_server)
-        else:
-            server = smtplib.SMTP(smtp_server)
-            server.starttls()
-        server.connect(smtp_server, smtp_port)
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, receivers, message.as_string())
-        server.quit()
-        log(f"邮件已发送至: {', '.join(receivers)}")
-    except Exception as e:
-        log(f"邮件发送失败: {e}")
+    if mail_type == "smtp":
+        # 原有 SMTP 发送逻辑
+        smtp_server = email_config["smtp_server"]
+        smtp_port = email_config["smtp_port"]
+        sender_email = email_config["sender_email"]
+        sender_password = email_config["sender_password"]
+        receivers = email_config["receiver_emails"]
+
+        message = MIMEText(body, "plain", "utf-8")
+        message["From"] = Header(sender_email)
+        message["To"] = Header(",".join(receivers))
+        message["Subject"] = Header(subject, "utf-8")
+
+        try:
+            if smtp_port == 465:
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+            else:
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, receivers, message.as_string())
+            server.quit()
+            log(f"邮件已通过 SMTP 发送至: {', '.join(receivers)}")
+        except Exception as e:
+            log(f"SMTP 邮件发送失败: {e}")
+
+    elif mail_type == "curl":
+        # 使用 HTTP API 发送邮件
+        api_url = email_config.get("api_url")
+        api_key = email_config.get("api_key")
+        receivers = email_config.get("receiver_emails", [])
+
+        if not api_url or not api_key:
+            log("curl 邮件配置缺失：api_url 或 api_key 未设置")
+            return
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "receivers": receivers,
+            "Subject": subject,
+            "content": body
+        }
+        try:
+            resp = requests.post(api_url, json=payload, headers=headers, timeout=30)
+            resp.raise_for_status()
+            log(f"邮件已通过 HTTP API 发送，状态码: {resp.status_code}")
+        except Exception as e:
+            log(f"HTTP API 邮件发送失败: {e}")
+
+    else:
+        log(f"未知的邮件发送方式: {mail_type}")
+
 
 # ---------- HTTP 状态服务 ----------
 class StatusHandler(http.server.BaseHTTPRequestHandler):
