@@ -587,6 +587,7 @@ def run_analysis():
             print(analysis)
 
             if re.search(r"预测\s*[:：]\s*涨", analysis):
+                log(f"AI 分析股票涨结果 {analysis} ")
                 results_up.append({
                     "code": code,
                     "price": price,
