@@ -16,6 +16,9 @@ from pandas.tseries.offsets import BDay
 import requests
 from bs4 import BeautifulSoup
 
+import signal
+from contextlib import contextmanager
+
 import akshare as ak
 import baostock as bs
 from openai import OpenAI
@@ -54,29 +57,67 @@ web_passwd = config.get("web", {}).get("passwd")  # 若配置，则启动HTTP状
 AI_CONFIG = config.get("ai", {})
 schedule_time_str = config.get("schedule_time", "09:00")  # 定时执行时间，默认09:00
 
-# ---------- 获取低价股列表（自动选择实时行情源） ----------
-def get_lowest_price_stocks(n: int = 10) -> list:
-    """获取股价最低的 n 只非停牌、非ST股票，自动尝试多个数据源"""
+
+
+class TimeoutException(Exception):
+    pass
+
+@contextmanager
+def time_limit(seconds):
+    """在 Unix/Linux 下可用，Windows 需使用其他方式"""
+    def signal_handler(signum, frame):
+        raise TimeoutException("Timed out")
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+
+def get_lowest_price_stocks(n: int = 10, max_retries: int = 3, retry_delay: int = 5, timeout: int = 30) -> list:
+    """
+    获取股价最低的 n 只非停牌、非ST股票，自动尝试多个数据源，每个源支持重试和超时
+    :param n: 返回股票数量
+    :param max_retries: 每个数据源最大重试次数
+    :param retry_delay: 重试间隔秒数
+    :param timeout: 单次请求超时秒数
+    """
     data_sources = [
         ("新浪", lambda: ak.stock_zh_a_spot()),
         ("东方财富", lambda: ak.stock_zh_a_spot_em()),
     ]
+    
     df_spot = None
     source_name = ""
+    
     for name, func in data_sources:
-        try:
-            log(f"尝试 {name} 实时行情...")
-            df = func()
-            if df is not None and not df.empty:
-                df_spot = df
-                source_name = name
+        for attempt in range(max_retries):
+            try:
+                log(f"尝试 {name} 实时行情，第 {attempt+1}/{max_retries} 次...")
+                # 使用信号设置超时（仅限 Unix/Linux，Windows 需使用其他方法）
+                with time_limit(timeout):
+                    df = func()
+                if df is not None and not df.empty:
+                    df_spot = df
+                    source_name = name
+                    log(f"{name} 获取成功，共 {len(df_spot)} 条数据")
+                    break
+                else:
+                    log(f"{name} 返回空数据")
+            except TimeoutException:
+                log(f"{name} 请求超时（{timeout}秒）")
+            except Exception as e:
+                log(f"{name} 获取失败: {e}")
+            
+            if df_spot is not None:
                 break
-            else:
-                log(f"{name} 返回空数据")
-        except Exception as e:
-            log(f"{name} 获取失败: {e}")
-        time.sleep(1)
-
+            if attempt < max_retries - 1:
+                log(f"等待 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+        
+        if df_spot is not None:
+            break
+    
     if df_spot is None:
         log("所有实时行情数据源均不可用")
         return []
