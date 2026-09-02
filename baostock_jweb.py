@@ -56,7 +56,9 @@ SHUTDOWN_AFTER_RUN = config.get("shutdown", False)
 web_passwd = config.get("web", {}).get("passwd")  # 若配置，则启动HTTP状态服务
 AI_CONFIG = config.get("ai", {})
 schedule_time_str = config.get("schedule_time", "09:00")  # 定时执行时间，默认09:00
-
+NEWS_REFRESH_CONFIG = config.get("news_refresh", {})
+NEWS_REFRESH_ENABLED = NEWS_REFRESH_CONFIG.get("enabled", True)
+NEWS_REFRESH_INTERVAL = NEWS_REFRESH_CONFIG.get("interval_minutes", 30)
 
 
 class TimeoutException(Exception):
@@ -683,9 +685,8 @@ def main():
     else:
         log("未配置 web.passwd，HTTP 状态服务不启动")
 
-    log(f"程序启动，定时调度模式：每天 {schedule_time_str} 执行AI分析，其他时间每30分钟刷新新闻")
+    log(f"程序启动，定时调度模式：每天 {schedule_time_str} 执行AI分析，其他时间每 {NEWS_REFRESH_INTERVAL} 分钟刷新新闻（启用：{NEWS_REFRESH_ENABLED}）")
 
-    # 解析调度时间
     try:
         schedule_hour, schedule_minute = map(int, schedule_time_str.split(":"))
     except Exception:
@@ -694,40 +695,46 @@ def main():
 
     tz = ZoneInfo("Asia/Shanghai")
     now = datetime.now(tz)
-    last_analysis_date = None
 
-    # 启动时判断：若已过设定时间，立即执行一次分析，否则等待到设定时间
+    # 启动时判断
     if (now.hour > schedule_hour or (now.hour == schedule_hour and now.minute >= schedule_minute)):
         log(f"启动时已过设定时间 {schedule_time_str}，立即执行AI分析")
         run_analysis()
-        last_analysis_date = now.date()
-        log("AI分析完成，进入新闻刷新循环（每30分钟）")
     else:
         log(f"未到设定时间，等待到 {schedule_time_str} 执行AI分析")
         wait_until_schedule(schedule_hour, schedule_minute)
         run_analysis()
-        last_analysis_date = datetime.now(tz).date()
-        log("AI分析完成，进入新闻刷新循环（每30分钟）")
 
-    # 新闻刷新循环，直到第二天设定时间
+    # 后续循环
     while True:
-        time.sleep(1800)
-        now = datetime.now(tz)
-        log(f"新闻刷新唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-        # 检查是否到达新的一天的设定时间
-        if (now.date() != last_analysis_date) and \
-           (now.hour > schedule_hour or (now.hour == schedule_hour and now.minute >= schedule_minute)):
-            log(f"到达新一天的调度时间 {schedule_time_str}，执行AI分析")
+        if NEWS_REFRESH_ENABLED:
+            # 新闻刷新循环，直到下一次分析时间
+            while True:
+                time.sleep(NEWS_REFRESH_INTERVAL * 60)
+                now = datetime.now(tz)
+                log(f"新闻刷新唤醒，当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
+                next_run = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
+                if now >= next_run:
+                    log("到达下一次分析时间，退出新闻刷新循环")
+                    break
+                else:
+                    refresh_news()
+                    next_refresh = now + timedelta(minutes=NEWS_REFRESH_INTERVAL)
+                    log(f"下一次新闻刷新预计时间：{next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
+            # 执行分析
             run_analysis()
-            last_analysis_date = now.date()
-            log("AI分析完成，继续新闻刷新循环")
         else:
-            refresh_news()
-            next_refresh = now + timedelta(minutes=30)
-            log(f"下一次新闻刷新预计时间：{next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
-
+            # 直接等待到第二天设定时间
+            now = datetime.now(tz)
+            next_run = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
+            if now >= next_run:
+                next_run += timedelta(days=1)
+            wait_seconds = (next_run - now).total_seconds()
+            log(f"新闻刷新已禁用，下次分析时间：{next_run.strftime('%Y-%m-%d %H:%M:%S')}，等待 {wait_seconds/3600:.2f} 小时")
+            time.sleep(wait_seconds)
+            run_analysis()
 
 
 if __name__ == "__main__":
     main()
+
