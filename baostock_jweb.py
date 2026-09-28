@@ -655,7 +655,8 @@ def run_analysis():
                 body += "-" * 40 + "\n"
             send_email(subject, body, EMAIL_CONFIG)
         else:
-            log("没有股票被预测为涨，不发送邮件。")
+            log("没有股票被预测为涨。")
+            send_email("没有股票被预测为涨。", "没有股票被预测为涨。", EMAIL_CONFIG)
 
         log("========== 本次股票分析任务结束 ==========")
 
