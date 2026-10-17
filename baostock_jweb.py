@@ -1,4 +1,4 @@
-import json,os,re,smtplib,time,requests,signal,random
+import json,os,re,smtplib,time,requests,signal,random,sys,traceback
 import http.server
 from urllib.parse import urlparse, parse_qs
 from email.mime.text import MIMEText
@@ -17,6 +17,20 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
+
+
+
+
+def _stack_dumper(interval=60):
+    while True:
+        time.sleep(interval)
+        print(f"\n===== 定时堆栈快照 {time.strftime('%H:%M:%S')} =====", flush=True)
+        for tid, frame in sys._current_frames().items():
+            print(f"--- Thread {tid} ---", flush=True)
+            traceback.print_stack(frame, file=sys.stdout)
+        print("===== 快照结束 =====\n", flush=True)
+
+threading.Thread(target=_stack_dumper, args=(60,), daemon=True).start()
     
 
 CONFIG_FILE = "aks_config_jweb.json"
