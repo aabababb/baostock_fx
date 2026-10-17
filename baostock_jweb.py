@@ -81,43 +81,81 @@ def time_limit(seconds):
 
 
 
+
 class ProxyManager:
     def __init__(self,
                  api_url="http://api.goodips.com/?anonymity=%E9%AB%98%E5%8C%BF&protocol=HTTPS&format=json",
                  refresh_interval=600,      # 正常刷新间隔 10 分钟
-                 api_cooldown=120):         # 触发 429 后的冷却时间 2 分钟
+                 api_cooldown=180):         # 429 后的冷却时间 3 分钟
         self.api_url = api_url
-        self.proxies = []                # 有效代理列表 [{"proxy":..., "fail":0}]
+        self.proxies = []                # 有效代理列表 [{"proxy":..., "latency":..., "fail":...}]
         self.lock = Lock()
         self.last_refresh = 0
         self.refresh_interval = refresh_interval
         self.api_cooldown = api_cooldown
         self.api_blocked_until = 0       # 被限流后的禁止刷新时间戳
 
-    # ---------- 获取代理列表 ----------
-    def fetch_proxies(self):
+        # 创建带浏览器请求头的 Session
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-cache",
+        })
+
+    # ---------- 带重试的代理列表获取 ----------
+    def fetch_proxies_with_retry(self, max_retries=3):
+        """
+        从代理 API 获取列表，支持指数退避 + Retry-After + 429 冷却
+        返回 data 列表；失败返回 None
+        """
+        # 若处于冷却期，直接返回 None
         now = time.time()
         if now < self.api_blocked_until:
             print(f"代理 API 处于冷却状态，{int(self.api_blocked_until - now)} 秒后可重试")
             return None
 
-        try:
-            resp = requests.get(self.api_url, timeout=10)
-            if resp.status_code == 429:
-                print("代理 API 触发 429，进入冷却...")
-                self.api_blocked_until = now + self.api_cooldown
-                return None
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") == 0 and "data" in data:
-                return data["data"]
-            return None
-        except Exception as e:
-            print(f"获取代理列表失败: {e}")
-            return None
+        for attempt in range(max_retries):
+            try:
+                resp = self.session.get(self.api_url, timeout=10)
+
+                # 处理 429 限流
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        wait = int(retry_after)
+                    else:
+                        wait = (2 ** attempt) + random.uniform(0, 1)  # 指数退避 + 抖动
+                    print(f"代理 API 触发 429（第 {attempt+1}/{max_retries} 次），等待 {wait:.1f} 秒...")
+                    # 第一次 429 就进入冷却，避免后续请求继续触发限流
+                    self.api_blocked_until = time.time() + self.api_cooldown
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+
+                if data.get("code") == 0 and "data" in data:
+                    return data["data"]
+                else:
+                    print(f"代理 API 返回异常: {data.get('msg', 'unknown error')}")
+                    return None
+
+            except requests.exceptions.RequestException as e:
+                print(f"获取代理列表失败（第 {attempt+1}/{max_retries} 次）: {e}")
+                if attempt == max_retries - 1:
+                    return None
+                time.sleep(2 ** attempt)  # 指数退避
+
+        return None
 
     # ---------- 验证单个代理 ----------
     def check_proxy(self, proxy_info, test_url="http://ipv4.icanhazip.com/", timeout=8):
+        """验证单个代理是否有效，返回 (是否有效, 延迟秒数)"""
         ip = proxy_info["ip"]
         port = proxy_info["port"]
         proxies = {"http": f"http://{ip}:{port}", "https": f"http://{ip}:{port}"}
@@ -132,25 +170,30 @@ class ProxyManager:
 
     # ---------- 刷新代理池 ----------
     def refresh(self, force=False):
+        """刷新代理池：获取列表 + 验证，失败时保留原有代理池"""
         with self.lock:
             now = time.time()
+
             # 冷却期内不刷新
             if now < self.api_blocked_until:
+                print(f"代理 API 冷却中，跳过刷新（剩余 {int(self.api_blocked_until - now)} 秒）")
                 return
+
             # 非强制刷新且未到间隔
             if not force and now - self.last_refresh < self.refresh_interval and self.proxies:
                 return
 
-            # 强制刷新时，如果已有较多可用代理，也不刷新（除非真的全坏）
+            # 强制刷新时，若已有足够多的可用代理，也不刷新
             if force and len(self.proxies) >= 3:
                 return
 
             print("正在刷新代理池...")
-            proxy_list = self.fetch_proxies()
+            proxy_list = self.fetch_proxies_with_retry()
             if not proxy_list:
-                # 刷新失败，保留原有代理池
+                print("代理 API 获取失败，保留原有代理池")
                 return
 
+            # 并发验证（可改为串行，这里用串行更稳定）
             valid = []
             for pinfo in proxy_list:
                 ok, latency = self.check_proxy(pinfo)
@@ -160,6 +203,7 @@ class ProxyManager:
                         "latency": latency,
                         "fail": 0,
                     })
+
             valid.sort(key=lambda x: x["latency"])
 
             if valid:
@@ -171,7 +215,7 @@ class ProxyManager:
 
     # ---------- 获取一个代理 ----------
     def get_proxies_dict(self, exclude=None):
-        """返回 requests 可用的 proxies 字典；优先使用低延迟代理"""
+        """返回 requests 可用的 proxies 字典及代理字符串"""
         with self.lock:
             candidates = [p for p in self.proxies if p["proxy"] != exclude]
             if not candidates:
@@ -180,24 +224,28 @@ class ProxyManager:
                 candidates = self.proxies
             if not candidates:
                 return None, None
-            # 前 50% 低延迟中随机
+            # 从前 50% 低延迟中随机选择
             top_half = candidates[:max(1, len(candidates) // 2)]
             chosen = random.choice(top_half)
             return {"http": chosen["proxy"], "https": chosen["proxy"]}, chosen["proxy"]
 
     # ---------- 标记代理失败 ----------
     def mark_bad(self, proxy_str):
+        """标记代理失败，连续失败 2 次则移除"""
         with self.lock:
             for p in self.proxies:
                 if p["proxy"] == proxy_str:
                     p["fail"] += 1
-                    if p["fail"] >= 2:  # 连续失败 2 次即移除
+                    if p["fail"] >= 2:
                         self.proxies.remove(p)
                         print(f"移除失效代理: {proxy_str}")
                     break
 
 
+# 全局代理管理器实例
 proxy_manager = ProxyManager()
+
+
 
 
 
