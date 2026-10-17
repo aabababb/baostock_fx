@@ -154,19 +154,35 @@ class ProxyManager:
         return None
 
     # ---------- 验证单个代理 ----------
-    def check_proxy(self, proxy_info, test_url="http://ipv4.icanhazip.com/", timeout=8):
-        """验证单个代理是否有效，返回 (是否有效, 延迟秒数)"""
+
+    def check_proxy(self, proxy_info, timeout=8):
+        """用实际目标域名（东方财富 HTTPS）验证代理是否支持 CONNECT 隧道"""
         ip = proxy_info["ip"]
         port = proxy_info["port"]
-        proxies = {"http": f"http://{ip}:{port}", "https": f"http://{ip}:{port}"}
+        proxies = {
+            "http": f"http://{ip}:{port}",
+            "https": f"http://{ip}:{port}",   # HTTP 代理转发 HTTPS 也是用 http:// 前缀
+        }
+        test_url = "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.000001&fields=f2"
         start = time.time()
         try:
-            resp = requests.get(test_url, proxies=proxies, timeout=timeout)
-            if resp.status_code == 200 and resp.text.strip() == ip:
+            resp = requests.get(
+                test_url,
+                proxies=proxies,
+                timeout=timeout,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": "https://quote.eastmoney.com/",
+                }
+            )
+            if resp.status_code == 200:
                 return True, time.time() - start
             return False, None
         except Exception:
             return False, None
+    
+
 
     # ---------- 刷新代理池 ----------
     def refresh(self, force=False):
