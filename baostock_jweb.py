@@ -12,7 +12,7 @@ from contextlib import contextmanager
 import baostock as bs
 from openai import OpenAI
 import threading
-from threading import Lock
+from threading import RLock
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -95,7 +95,6 @@ def time_limit(seconds):
 
 
 
-
 class ProxyManager:
     def __init__(self,
                  api_url="http://api.goodips.com/?anonymity=%E9%AB%98%E5%8C%BF&protocol=HTTPS&format=json",
@@ -103,7 +102,7 @@ class ProxyManager:
                  api_cooldown=180):         # 429 后的冷却时间 3 分钟
         self.api_url = api_url
         self.proxies = []                # 有效代理列表 [{"proxy":..., "latency":..., "fail":...}]
-        self.lock = Lock()
+        self.lock = RLock()
         self.last_refresh = 0
         self.refresh_interval = refresh_interval
         self.api_cooldown = api_cooldown
@@ -122,50 +121,28 @@ class ProxyManager:
         })
 
     # ---------- 带重试的代理列表获取 ----------
-    def fetch_proxies_with_retry(self, max_retries=3):
-        """
-        从代理 API 获取列表，支持指数退避 + Retry-After + 429 冷却
-        返回 data 列表；失败返回 None
-        """
-        # 若处于冷却期，直接返回 None
+    def fetch_proxies_with_retry(self, max_retries=1):   # 只试 1 次
         now = time.time()
         if now < self.api_blocked_until:
-            print(f"代理 API 处于冷却状态，{int(self.api_blocked_until - now)} 秒后可重试")
+            return None
+        try:
+            resp = self.session.get(self.api_url, timeout=(5, 10))
+            if resp.status_code == 429:
+                self.api_blocked_until = time.time() + self.api_cooldown
+                print("[fetch_proxies] 429，进入冷却")
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == 0 and "data" in data:
+                return data["data"]
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"[fetch_proxies] 请求失败，快速放弃: {type(e).__name__}: {e}")
+            # 失败后设置冷却，避免每次调用都重试
+            self.api_blocked_until = time.time() + self.api_cooldown
             return None
 
-        for attempt in range(max_retries):
-            try:
-                resp = self.session.get(self.api_url, timeout=10)
 
-                # 处理 429 限流
-                if resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after and retry_after.isdigit():
-                        wait = int(retry_after)
-                    else:
-                        wait = (2 ** attempt) + random.uniform(0, 1)  # 指数退避 + 抖动
-                    print(f"代理 API 触发 429（第 {attempt+1}/{max_retries} 次），等待 {wait:.1f} 秒...")
-                    # 第一次 429 就进入冷却，避免后续请求继续触发限流
-                    self.api_blocked_until = time.time() + self.api_cooldown
-                    time.sleep(wait)
-                    continue
-
-                resp.raise_for_status()
-                data = resp.json()
-
-                if data.get("code") == 0 and "data" in data:
-                    return data["data"]
-                else:
-                    print(f"代理 API 返回异常: {data.get('msg', 'unknown error')}")
-                    return None
-
-            except requests.exceptions.RequestException as e:
-                print(f"获取代理列表失败（第 {attempt+1}/{max_retries} 次）: {e}")
-                if attempt == max_retries - 1:
-                    return None
-                time.sleep(2 ** attempt)  # 指数退避
-
-        return None
 
     # ---------- 验证单个代理 ----------
 
@@ -244,20 +221,27 @@ class ProxyManager:
                 print("本次刷新未获取到有效代理，保留原有代理池")
 
     # ---------- 获取一个代理 ----------
+
     def get_proxies_dict(self, exclude=None):
-        """返回 requests 可用的 proxies 字典及代理字符串"""
+        # 1. 先在锁内读取候选
         with self.lock:
             candidates = [p for p in self.proxies if p["proxy"] != exclude]
-            if not candidates:
-                # 没有可用代理时，尝试刷新一次（非强制）
-                self.refresh()
-                candidates = self.proxies
-            if not candidates:
-                return None, None
-            # 从前 50% 低延迟中随机选择
+
+        # 2. 锁外判断是否需要刷新（refresh 内部自己加锁）
+        if not candidates:
+            self.refresh()
+            with self.lock:
+                candidates = [p for p in self.proxies if p["proxy"] != exclude]
+
+        if not candidates:
+            return None, None
+
+        with self.lock:
             top_half = candidates[:max(1, len(candidates) // 2)]
             chosen = random.choice(top_half)
-            return {"http": chosen["proxy"], "https": chosen["proxy"]}, chosen["proxy"]
+        return {"http": chosen["proxy"], "https": chosen["proxy"]}, chosen["proxy"]
+    
+
 
     # ---------- 标记代理失败 ----------
     def mark_bad(self, proxy_str):
@@ -381,15 +365,14 @@ def fetch_sina_spot_all(max_pages=80, page_size=80):
     return df
 
 
-
-
 def fetch_eastmoney_spot_all(page_size=100):
-    """
-    通过代理获取东方财富全部 A 股实时行情（按最新价升序）
-    优化：只获取最后一页，直接得到低价股列表
-    """
     proxy_manager.refresh()
-    proxies = proxy_manager.get_proxies_dict()
+    # 如果代理池为空，直接用直连（proxies=None）
+    proxies, proxy_str = proxy_manager.get_proxies_dict()
+    if proxies is None:
+        print("[eastmoney] 代理池为空，尝试直连")
+        proxies = None
+
 
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
     
