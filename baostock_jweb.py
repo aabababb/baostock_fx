@@ -261,24 +261,19 @@ proxy_manager = ProxyManager()
 
 
 
-
-
-
 def request_with_proxy(method, url, params=None, json_data=None, headers=None,
-                       max_retries=5, timeout=15):
-    """
-    使用代理发起请求，失败时切换代理，代理池耗尽才刷新
-    """
+                       max_retries=3, timeout=(5, 15), allow_direct=True):
     if headers is None:
         headers = HEADERS
 
     last_proxy = None
     for attempt in range(max_retries):
         proxies, proxy_str = proxy_manager.get_proxies_dict(exclude=last_proxy)
+
+        # 代理池为空时，如果允许直连，则不带代理发请求
         if proxies is None:
-            print(f"无可用代理（第 {attempt+1} 次）")
-            time.sleep(3)
-            continue
+            print(f"[request] 代理池为空，第 {attempt+1} 次尝试直连")
+            proxies = None
 
         try:
             if method.upper() == "GET":
@@ -291,17 +286,22 @@ def request_with_proxy(method, url, params=None, json_data=None, headers=None,
             if resp.status_code == 200:
                 return resp
             else:
-                print(f"请求返回非200: {resp.status_code}")
-                proxy_manager.mark_bad(proxy_str)
+                print(f"[request] 返回非200: {resp.status_code}")
+                if proxy_str:
+                    proxy_manager.mark_bad(proxy_str)
                 last_proxy = proxy_str
         except Exception as e:
-            print(f"请求失败（第{attempt+1}次，代理 {proxy_str}）: {e}")
-            proxy_manager.mark_bad(proxy_str)
+            print(f"[request] 失败（第{attempt+1}次，代理={proxy_str}）: {type(e).__name__}: {str(e)[:80]}")
+            if proxy_str:
+                proxy_manager.mark_bad(proxy_str)
             last_proxy = proxy_str
 
         time.sleep(1)
 
     return None
+
+
+
 
 
 def get_with_proxy(url, params=None, headers=None, max_retries=5, timeout=15):
