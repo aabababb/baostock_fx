@@ -8,7 +8,7 @@ import pandas as pd
 from pandas.tseries.offsets import BDay
 from bs4 import BeautifulSoup
 from contextlib import contextmanager
-#import akshare as ak
+import akshare as ak
 import baostock as bs
 from openai import OpenAI
 import threading
