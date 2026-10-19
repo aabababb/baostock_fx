@@ -30,7 +30,7 @@ def _stack_dumper(interval=60):
             traceback.print_stack(frame, file=sys.stdout)
         print("===== 快照结束 =====\n", flush=True)
 
-threading.Thread(target=_stack_dumper, args=(60,), daemon=True).start()
+#threading.Thread(target=_stack_dumper, args=(60,), daemon=True).start()
     
 
 CONFIG_FILE = "aks_config_jweb.json"
