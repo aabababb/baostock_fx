@@ -366,77 +366,50 @@ def fetch_sina_spot_all(max_pages=80, page_size=80):
 
 
 def fetch_eastmoney_spot_all(page_size=100):
+    """通过代理/直连获取东方财富全部 A 股实时行情（按最新价升序，只取第1页=最低价）"""
     proxy_manager.refresh()
-    # 如果代理池为空，直接用直连（proxies=None）
-    proxies, proxy_str = proxy_manager.get_proxies_dict()
-    if proxies is None:
-        print("[eastmoney] 代理池为空，尝试直连")
-        proxies = None
-
 
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
-    
-    # 公共参数
-    common_params = {
-        "po": 0,                  # 升序
+    params = {
+        "pn": 1,                      # 第 1 页
+        "pz": page_size,              # 每页 100 条
+        "po": 1,                      # 1 = 升序（从低到高）
         "np": 1,
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2,
         "invt": 2,
-        "fid": "f2",              # 按最新价排序
+        "fid": "f2",                  # 按最新价排序
         "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
         "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152",
+        "_": int(time.time() * 1000),
     }
 
-    # 第一步：请求第1页，获取总数量
-    params_page1 = {**common_params, "pn": 1, "pz": page_size, "_": int(time.time() * 1000)}
-    resp = get_with_proxy(base_url, params=params_page1, 
-                          headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"})
+    resp = get_with_proxy(
+        base_url, params=params,
+        headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"}
+    )
     if resp is None:
-        print("获取总数量失败")
-        return pd.DataFrame()
-
-    try:
-        data = resp.json()
-        total = data.get("data", {}).get("total", 0)
-        if total == 0:
-            print("未获取到股票总数")
-            return pd.DataFrame()
-        print(f"全市场股票总数: {total}")
-    except Exception as e:
-        print(f"解析总数量失败: {e}")
-        return pd.DataFrame()
-
-    # 第二步：计算最后一页的页码
-    total_pages = (total + page_size - 1) // page_size
-    print(f"总页数: {total_pages}，将直接获取最后一页 (第 {total_pages} 页)")
-
-    # 第三步：请求最后一页
-    params_last = {**common_params, "pn": total_pages, "pz": page_size, "_": int(time.time() * 1000)}
-    resp = get_with_proxy(base_url, params=params_last,
-                          headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"})
-    if resp is None:
-        print("获取最后一页失败")
+        print("[eastmoney] 请求失败")
         return pd.DataFrame()
 
     try:
         data = resp.json()
         rows = data.get("data", {}).get("diff", [])
         if not rows:
-            print("最后一页无数据")
+            print("[eastmoney] 返回空数据")
             return pd.DataFrame()
-        print(f"最后一页获取 {len(rows)} 条数据")
+        print(f"[eastmoney] 获取到 {len(rows)} 条（升序第1页，应为最低价）")
     except Exception as e:
-        print(f"解析最后一页失败: {e}")
+        print(f"[eastmoney] 解析失败: {e}")
         return pd.DataFrame()
 
-    # 转换为 DataFrame
     df = pd.DataFrame(rows)
     df.rename(columns={
         "f12": "代码", "f14": "名称", "f2": "最新价",
         "f5": "成交量", "f6": "成交额", "f3": "涨跌幅",
     }, inplace=True)
     return df
+
 
 
 
