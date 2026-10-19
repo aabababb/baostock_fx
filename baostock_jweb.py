@@ -21,18 +21,6 @@ except ImportError:
 
 
 
-def _stack_dumper(interval=60):
-    while True:
-        time.sleep(interval)
-        print(f"\n===== 定时堆栈快照 {time.strftime('%H:%M:%S')} =====", flush=True)
-        for tid, frame in sys._current_frames().items():
-            print(f"--- Thread {tid} ---", flush=True)
-            traceback.print_stack(frame, file=sys.stdout)
-        print("===== 快照结束 =====\n", flush=True)
-
-#threading.Thread(target=_stack_dumper, args=(60,), daemon=True).start()
-    
-
 CONFIG_FILE = "aks_config_jweb.json"
 
 # ---------- 全局日志缓冲区 ----------
@@ -79,6 +67,29 @@ HEADERS = {
 
 class TimeoutException(Exception):
     pass
+
+
+DEBUG_CONFIG = config.get("debug", {})
+STACK_DUMP_ENABLED = DEBUG_CONFIG.get("stack_dump", False)
+
+if STACK_DUMP_ENABLED:
+    threading.Thread(target=_stack_dumper, args=(60,), daemon=True).start()
+    print("[debug] 堆栈快照已启用（每60秒）", flush=True)
+
+
+
+
+def _stack_dumper(interval=60):
+    while True:
+        time.sleep(interval)
+        print(f"\n===== 定时堆栈快照 {time.strftime('%H:%M:%S')} =====", flush=True)
+        for tid, frame in sys._current_frames().items():
+            print(f"--- Thread {tid} ---", flush=True)
+            traceback.print_stack(frame, file=sys.stdout)
+        print("===== 快照结束 =====\n", flush=True)
+
+
+
 
 @contextmanager
 def time_limit(seconds):
