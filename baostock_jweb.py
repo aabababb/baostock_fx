@@ -377,14 +377,14 @@ def fetch_sina_spot_all(max_pages=80, page_size=80):
 
 
 def fetch_eastmoney_spot_all(page_size=100):
-    """通过代理/直连获取东方财富全部 A 股实时行情（按最新价升序，只取第1页=最低价）"""
+    """获取东方财富 A 股实时行情（按最新价升序，第1页=最低价）"""
     proxy_manager.refresh()
 
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
-        "pn": 1,                      # 第 1 页
-        "pz": page_size,              # 每页 100 条
-        "po": 1,                      # 1 = 升序（从低到高）
+        "pn": 1,
+        "pz": page_size,
+        "po": 0,                      # ★ 0 = 升序（从低到高）
         "np": 1,
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2,
@@ -409,7 +409,8 @@ def fetch_eastmoney_spot_all(page_size=100):
         if not rows:
             print("[eastmoney] 返回空数据")
             return pd.DataFrame()
-        print(f"[eastmoney] 获取到 {len(rows)} 条（升序第1页，应为最低价）")
+        # 打印首条价格，方便确认排序方向
+        print(f"[eastmoney] 获取 {len(rows)} 条，首条价格={rows[0].get('f2')}")
     except Exception as e:
         print(f"[eastmoney] 解析失败: {e}")
         return pd.DataFrame()
@@ -516,7 +517,8 @@ def get_lowest_price_stocks(n: int = 10, max_retries: int = 3) -> list:
     if name_col:
         df_spot = df_spot[~df_spot[name_col].astype(str).str.contains("ST", case=False, na=False)]
 
-    df_sorted = df_spot.sort_values(by=price_col)
+        
+    df_sorted = df_spot.sort_values(by=price_col, ascending=True)  # ★ 升序
     lowest = df_sorted.head(n)
     result = list(zip(
         lowest[code_col].astype(str).str.replace(r'\D', '', regex=True),
