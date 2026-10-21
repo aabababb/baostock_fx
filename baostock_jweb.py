@@ -140,7 +140,7 @@ class ProxyManager:
             resp = self.session.get(self.api_url, timeout=(5, 10))
             if resp.status_code == 429:
                 self.api_blocked_until = time.time() + self.api_cooldown
-                print("[fetch_proxies] 429，进入冷却")
+                log("[fetch_proxies] 429，进入冷却")
                 return None
             resp.raise_for_status()
             data = resp.json()
@@ -148,7 +148,7 @@ class ProxyManager:
                 return data["data"]
             return None
         except requests.exceptions.RequestException as e:
-            print(f"[fetch_proxies] 请求失败，快速放弃: {type(e).__name__}: {e}")
+            log(f"[fetch_proxies] 请求失败，快速放弃: {type(e).__name__}: {e}")
             # 失败后设置冷却，避免每次调用都重试
             self.api_blocked_until = time.time() + self.api_cooldown
             return None
@@ -194,7 +194,7 @@ class ProxyManager:
 
             # 冷却期内不刷新
             if now < self.api_blocked_until:
-                print(f"代理 API 冷却中，跳过刷新（剩余 {int(self.api_blocked_until - now)} 秒）")
+                log(f"代理 API 冷却中，跳过刷新（剩余 {int(self.api_blocked_until - now)} 秒）")
                 return
 
             # 非强制刷新且未到间隔
@@ -205,10 +205,10 @@ class ProxyManager:
             if force and len(self.proxies) >= 3:
                 return
 
-            print("正在刷新代理池...")
+            log("正在刷新代理池...")
             proxy_list = self.fetch_proxies_with_retry()
             if not proxy_list:
-                print("代理 API 获取失败，保留原有代理池")
+                log("代理 API 获取失败，保留原有代理池")
                 return
 
             # 并发验证（可改为串行，这里用串行更稳定）
@@ -227,9 +227,9 @@ class ProxyManager:
             if valid:
                 self.proxies = valid
                 self.last_refresh = now
-                print(f"代理池刷新完成，有效代理 {len(valid)} 个")
+                log(f"代理池刷新完成，有效代理 {len(valid)} 个")
             else:
-                print("本次刷新未获取到有效代理，保留原有代理池")
+                log("本次刷新未获取到有效代理，保留原有代理池")
 
     # ---------- 获取一个代理 ----------
 
@@ -263,7 +263,7 @@ class ProxyManager:
                     p["fail"] += 1
                     if p["fail"] >= 2:
                         self.proxies.remove(p)
-                        print(f"移除失效代理: {proxy_str}")
+                        log(f"移除失效代理: {proxy_str}")
                     break
 
 
@@ -283,7 +283,7 @@ def request_with_proxy(method, url, params=None, json_data=None, headers=None,
 
         # 代理池为空时，如果允许直连，则不带代理发请求
         if proxies is None:
-            print(f"[request] 代理池为空，第 {attempt+1} 次尝试直连")
+            log(f"[request] 代理池为空，第 {attempt+1} 次尝试直连")
             proxies = None
 
         try:
@@ -297,12 +297,12 @@ def request_with_proxy(method, url, params=None, json_data=None, headers=None,
             if resp.status_code == 200:
                 return resp
             else:
-                print(f"[request] 返回非200: {resp.status_code}")
+                log(f"[request] 返回非200: {resp.status_code}")
                 if proxy_str:
                     proxy_manager.mark_bad(proxy_str)
                 last_proxy = proxy_str
         except Exception as e:
-            print(f"[request] 失败（第{attempt+1}次，代理={proxy_str}）: {type(e).__name__}: {str(e)[:80]}")
+            log(f"[request] 失败（第{attempt+1}次，代理={proxy_str}）: {type(e).__name__}: {str(e)[:80]}")
             if proxy_str:
                 proxy_manager.mark_bad(proxy_str)
             last_proxy = proxy_str
@@ -342,7 +342,7 @@ def fetch_sina_spot_all(max_pages=80, page_size=80):
         resp = get_with_proxy(base_url, params=params,
                               headers={**HEADERS, "Referer": "https://finance.sina.com.cn/"})
         if resp is None:
-            print(f"第 {page} 页请求失败")
+            log(f"第 {page} 页请求失败")
             break
 
         text = resp.text.strip()
@@ -353,13 +353,13 @@ def fetch_sina_spot_all(max_pages=80, page_size=80):
         try:
             data = json.loads(text)
         except Exception as e:
-            print(f"第 {page} 页解析失败: {e}")
+            log(f"第 {page} 页解析失败: {e}")
             break
 
         if not data:
             break
         all_rows.extend(data)
-        print(f"第 {page} 页获取 {len(data)} 条")
+        log(f"第 {page} 页获取 {len(data)} 条")
         if len(data) < page_size:
             break
         time.sleep(0.3)
@@ -376,46 +376,58 @@ def fetch_sina_spot_all(max_pages=80, page_size=80):
     return df
 
 
-def fetch_eastmoney_spot_all(page_size=100):
-    """获取东方财富 A 股实时行情（按最新价升序，第1页=最低价）"""
+def fetch_eastmoney_spot_all(page_size=100, pages=5):
+    """升序取前 pages 页，过滤停牌股后足够选出最低价股票"""
     proxy_manager.refresh()
-
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": 1,
-        "pz": page_size,
-        "po": 0,                      # ★ 0 = 升序（从低到高）
-        "np": 1,
-        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-        "fltt": 2,
-        "invt": 2,
-        "fid": "f2",                  # 按最新价排序
-        "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
-        "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152",
-        "_": int(time.time() * 1000),
-    }
+    all_rows = []
 
-    resp = get_with_proxy(
-        base_url, params=params,
-        headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"}
-    )
-    if resp is None:
-        print("[eastmoney] 请求失败")
-        return pd.DataFrame()
-
-    try:
-        data = resp.json()
-        rows = data.get("data", {}).get("diff", [])
+    for pn in range(1, pages + 1):
+        params = {
+            "pn": pn,
+            "pz": page_size,
+            "po": 0,                      # 升序：低价在前
+            "np": 1,
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": 2,
+            "invt": 2,
+            "fid": "f2",                  # 按最新价排序
+            "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
+            "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152",
+            "_": int(time.time() * 1000),
+        }
+        resp = get_with_proxy(
+            base_url, params=params,
+            headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"}
+        )
+        if resp is None:
+            log(f"[eastmoney] 第 {pn} 页请求失败", flush=True)
+            break
+        try:
+            data = resp.json()
+            rows = data.get("data", {}).get("diff", [])
+        except Exception as e:
+            log(f"[eastmoney] 第 {pn} 页解析失败: {e}", flush=True)
+            break
         if not rows:
-            print("[eastmoney] 返回空数据")
-            return pd.DataFrame()
-        # 打印首条价格，方便确认排序方向
-        print(f"[eastmoney] 获取 {len(rows)} 条，首条价格={rows[0].get('f2')}")
-    except Exception as e:
-        print(f"[eastmoney] 解析失败: {e}")
+            break
+
+        # 统计本页有效价格数量
+        valid_count = sum(1 for r in rows if r.get("f2") and float(r["f2"]) > 0)
+        log(f"[eastmoney] 第 {pn} 页 {len(rows)} 条，有效价格 {valid_count} 条，首条价格={rows[0].get('f2')}", flush=True)
+
+        all_rows.extend(rows)
+        # 如果本页有效价格已经足够多（比如 >= 30），可以提前停止
+        if valid_count >= 30:
+            break
+        if len(rows) < page_size:
+            break
+        time.sleep(0.5)
+
+    if not all_rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
     df.rename(columns={
         "f12": "代码", "f14": "名称", "f2": "最新价",
         "f5": "成交量", "f6": "成交额", "f3": "涨跌幅",
@@ -461,8 +473,8 @@ def get_stock_news_em_proxy(stock_code: str, max_news: int = 5) -> str:
 
 
 
+
 def get_lowest_price_stocks(n: int = 10, max_retries: int = 3) -> list:
-    """通过代理筛选低价股：先用东方财富，再用新浪"""
     data_sources = [
         ("东方财富", fetch_eastmoney_spot_all),
         ("新浪", fetch_sina_spot_all),
@@ -491,7 +503,7 @@ def get_lowest_price_stocks(n: int = 10, max_retries: int = 3) -> list:
 
     log(f"成功使用 {source_name} 获取 {len(df_spot)} 条行情数据")
 
-    # 列名自动识别 + 过滤（同前面代码）
+    # 列名识别
     code_col = price_col = volume_col = status_col = name_col = None
     for col in df_spot.columns:
         if "代码" in col: code_col = col
@@ -504,21 +516,35 @@ def get_lowest_price_stocks(n: int = 10, max_retries: int = 3) -> list:
         log(f"无法识别列名: {df_spot.columns.tolist()}")
         return []
 
+    # 逐步过滤并打印数量
+    log(f"过滤前总数: {len(df_spot)}")
+
     df_spot[price_col] = pd.to_numeric(df_spot[price_col], errors='coerce')
     df_spot = df_spot.dropna(subset=[price_col])
+    log(f"价格非空后: {len(df_spot)}")
+
     df_spot = df_spot[df_spot[price_col] > 0]
+    log(f"过滤价格<=0后: {len(df_spot)}")
 
     if volume_col:
         df_spot[volume_col] = pd.to_numeric(df_spot[volume_col], errors='coerce')
         df_spot = df_spot.dropna(subset=[volume_col])
         df_spot = df_spot[df_spot[volume_col] > 0]
+        log(f"过滤成交量<=0后: {len(df_spot)}")
+
     if status_col:
         df_spot = df_spot[~df_spot[status_col].astype(str).str.contains("停牌", na=False)]
+        log(f"过滤停牌状态后: {len(df_spot)}")
+
     if name_col:
         df_spot = df_spot[~df_spot[name_col].astype(str).str.contains("ST", case=False, na=False)]
+        log(f"过滤ST后: {len(df_spot)}")
 
-        
-    df_sorted = df_spot.sort_values(by=price_col, ascending=True)  # ★ 升序
+    if df_spot.empty:
+        log("过滤后数据为空，无法选出低价股")
+        return []
+
+    df_sorted = df_spot.sort_values(by=price_col, ascending=True)
     lowest = df_sorted.head(n)
     result = list(zip(
         lowest[code_col].astype(str).str.replace(r'\D', '', regex=True),
@@ -528,6 +554,9 @@ def get_lowest_price_stocks(n: int = 10, max_retries: int = 3) -> list:
     for code, price in result:
         log(f"  {code}: {price:.2f}")
     return result
+
+
+
 
 
 
